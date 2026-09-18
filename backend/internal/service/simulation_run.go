@@ -3,9 +3,11 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 	"time"
 
 	"gorm.io/datatypes"
@@ -22,8 +24,6 @@ const algorithmVersion = "air-balance-v1"
 type SimulationService struct {
 	runs      *repository.SimulationRunRepository
 	scenarios *repository.FanScenarioRepository
-	nodes     *repository.VentilationNodeRepository
-	edges     *repository.AirwayEdgeRepository
 }
 
 type simulationSnapshot struct {
@@ -43,8 +43,8 @@ type solverResult struct {
 	NetworkIssues []dto.NetworkIssue
 }
 
-func NewSimulationService(runs *repository.SimulationRunRepository, scenarios *repository.FanScenarioRepository, nodes *repository.VentilationNodeRepository, edges *repository.AirwayEdgeRepository) *SimulationService {
-	return &SimulationService{runs: runs, scenarios: scenarios, nodes: nodes, edges: edges}
+func NewSimulationService(runs *repository.SimulationRunRepository, scenarios *repository.FanScenarioRepository) *SimulationService {
+	return &SimulationService{runs: runs, scenarios: scenarios}
 }
 
 func (s *SimulationService) List(ctx context.Context, query dto.SimulationListQuery) ([]model.SimulationRun, int64, int, int, error) {
@@ -70,35 +70,62 @@ func (s *SimulationService) Start(ctx context.Context, scenarioID uint, actor Ac
 		return nil, mapRepositoryError(err, "风机方案")
 	}
 	if scenario.ScenarioStatus != string(constants.ScenarioStatusApproved) {
+		if reason := strings.TrimSpace(scenario.InvalidationReason); reason != "" {
+			return nil, api.Conflict("APPROVAL_INVALIDATED", fmt.Sprintf("方案批准已失效：%s，请复核员重新批准后再发起推演", reason))
+		}
 		return nil, api.Conflict("SCENARIO_NOT_APPROVED", "只有已批准方案可以发起离线推演")
 	}
-	nodes, err := s.nodes.AllActive(ctx)
-	if err != nil {
-		return nil, mapRepositoryError(err, "通风节点")
-	}
-	edges, err := s.edges.AllEnabled(ctx)
-	if err != nil {
-		return nil, mapRepositoryError(err, "巷道边")
-	}
-	result := solveNetwork(*scenario, nodes, edges)
-	now := time.Now().UTC()
-	snapshotJSON := mustJSON(simulationSnapshot{Scenario: *scenario, Nodes: nodes, Edges: edges})
-	run := &model.SimulationRun{
-		ScenarioID: scenario.ID, RunStatus: string(result.Status), IterationCount: result.Iterations,
-		Residual: result.Residual, InputSnapshotJSON: snapshotJSON,
-		NodePressuresJSON: mustJSON(result.Pressures), EdgeFlowsJSON: mustJSON(result.Flows),
-		ResidualsJSON: mustJSON(result.Residuals), RiskFlagsJSON: mustJSON(result.Risks),
-		AlgorithmVersion: algorithmVersion, StartedBy: actor.ID, StartedAt: now, FinishedAt: &now,
-	}
 	audit := actor.Audit("simulation_run.started", "simulation_run")
-	audit.Metadata = string(mustJSON(map[string]interface{}{
-		"scenario_id": scenario.ID, "result_status": result.Status,
-		"network_issues": result.NetworkIssues,
-	}))
-	if err := s.runs.Create(ctx, run, audit); err != nil {
-		return nil, mapRepositoryError(err, "推演记录")
+	run, err := s.runs.CreateGuarded(ctx, scenarioID, func(current model.FanScenario, nodes []model.VentilationNode, edges []model.AirwayEdge) (*model.SimulationRun, error) {
+		activeNodes := filterActiveNodes(nodes)
+		enabledEdges := filterEnabledEdges(edges)
+		result := solveNetwork(current, activeNodes, enabledEdges)
+		now := time.Now().UTC()
+		snapshotJSON := mustJSON(simulationSnapshot{Scenario: current, Nodes: activeNodes, Edges: enabledEdges})
+		audit.Metadata = string(mustJSON(map[string]interface{}{
+			"scenario_id": current.ID, "result_status": result.Status,
+			"network_issues":   result.NetworkIssues,
+			"network_revision": current.ApprovedNetworkRevision,
+		}))
+		return &model.SimulationRun{
+			ScenarioID: current.ID, RunStatus: string(result.Status), IterationCount: result.Iterations,
+			Residual: result.Residual, InputSnapshotJSON: snapshotJSON,
+			NodePressuresJSON: mustJSON(result.Pressures), EdgeFlowsJSON: mustJSON(result.Flows),
+			ResidualsJSON: mustJSON(result.Residuals), RiskFlagsJSON: mustJSON(result.Risks),
+			AlgorithmVersion: algorithmVersion, StartedBy: actor.ID, StartedAt: now, FinishedAt: &now,
+		}, nil
+	}, &audit)
+	if err != nil {
+		switch {
+		case errors.Is(err, repository.ErrScenarioNotApproved):
+			return nil, api.Conflict("SCENARIO_NOT_APPROVED", "方案批准状态已变化，请刷新后重试")
+		case errors.Is(err, repository.ErrApprovalStale):
+			return nil, api.Conflict("APPROVAL_STALE_NETWORK", "通风网络已变更，方案批准快照失效，请复核员重新批准")
+		default:
+			return nil, mapRepositoryError(err, "推演记录")
+		}
 	}
 	return run, nil
+}
+
+func filterActiveNodes(nodes []model.VentilationNode) []model.VentilationNode {
+	active := make([]model.VentilationNode, 0, len(nodes))
+	for _, node := range nodes {
+		if node.Status == string(constants.NodeStatusActive) {
+			active = append(active, node)
+		}
+	}
+	return active
+}
+
+func filterEnabledEdges(edges []model.AirwayEdge) []model.AirwayEdge {
+	enabled := make([]model.AirwayEdge, 0, len(edges))
+	for _, edge := range edges {
+		if edge.Enabled {
+			enabled = append(enabled, edge)
+		}
+	}
+	return enabled
 }
 
 func (s *SimulationService) ConfirmRisks(ctx context.Context, id uint, note string, actor Actor) (*model.SimulationRun, error) {

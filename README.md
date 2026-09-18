@@ -35,6 +35,9 @@ docker compose down -v --remove-orphans
 
 - 维护进风口、回风口、工作面、网络交点和有向巷道边，检测自环、孤立节点、边界缺失及不可达工作面。
 - 风机方案固定执行 `draft -> pending_review -> approved -> archived`，驳回返回 `draft` 并保留原因；版本条件更新防止并发越级。
+- 批准时在同一事务内绑定当时通风网络的内容指纹与版本（`network_states` 单行 + `approved_network_fingerprint`）；节点或巷道新增、停用及参数变化会在变更事务内比较指纹，真实变化立即使全部已批准方案失效回到 `pending_review` 并记录审计，无变化保存不影响批准。
+- 推演入口在启动事务内复核批准状态与网络指纹，不一致即以 `APPROVAL_INVALIDATED` / `APPROVAL_STALE_NETWORK` 拒绝并提示重新复核；复核员重新批准后绑定新快照恢复推演，历史运行始终保持原输入快照。
+- 批准绑定、网络变更与推演启动都串行在同一网络版本锁上，配合条件更新，并发变更不会让旧批准漏失效。
 - 根据巷道阻力关系执行确定性迭代，保存输入快照、每轮最大残差、节点压力、边风量和历史运行，不使用随机数伪造结果。
 - 计算风速超限、反向流、工作面需风缺口和关键路径中断四类规则证据，并要求复核员或管理员人工确认。
 - JWT、RBAC、请求限流、request ID、结构化日志和不可变操作审计贯穿后端与前端权限表现。
@@ -176,7 +179,7 @@ npm --prefix frontend run build
 - `project name must not be empty`：确认根目录 `.env` 存在且 `COMPOSE_PROJECT_NAME` 未改为中文；Compose 文件也已提供固定 `name` 兜底。
 - 后端未 healthy：执行 `docker compose logs backend`，重点检查 JWT 密钥长度、数据库密码和 PostgreSQL 健康状态。
 - 页面登录后请求 401：清除当前标签页的 `sessionStorage` 后重新登录；令牌只保存在会话存储中。
-- 方案不能推演：确认方案已由 `reviewer` 或 `admin` 迁移到 `approved`，工程师不能自行批准。
+- 方案不能推演：确认方案已由 `reviewer` 或 `admin` 迁移到 `approved`，工程师不能自行批准；若提示 `APPROVAL_INVALIDATED`，说明批准后通风网络发生变化，须由复核员重新批准绑定新快照。
 - 端口冲突：只能在确有冲突时同时修改 `.env` 与访问地址；项目规定端口用于批量验收时不要变更。
 
 ## License

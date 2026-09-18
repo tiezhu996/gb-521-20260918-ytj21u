@@ -63,11 +63,21 @@ func (r *AirwayEdgeRepository) CountByNode(ctx context.Context, nodeID uint) (in
 
 func (r *AirwayEdgeRepository) Create(ctx context.Context, edge *model.AirwayEdge, audit AuditRecord) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := lockNetworkState(tx); err != nil {
+			return err
+		}
+		beforeFingerprint, err := currentNetworkFingerprint(tx)
+		if err != nil {
+			return err
+		}
 		if err := tx.Create(edge).Error; err != nil {
 			return fmt.Errorf("create airway edge: %w", err)
 		}
-		after, _ := json.Marshal(edge)
 		audit.EntityID = edge.ID
+		if err := invalidateIfNetworkChanged(tx, beforeFingerprint, audit, fmt.Sprintf("通风网络变更：新增巷道 %s", edge.Code)); err != nil {
+			return err
+		}
+		after, _ := json.Marshal(edge)
 		audit.AfterState = string(after)
 		return writeAudit(tx, audit)
 	})
@@ -75,9 +85,16 @@ func (r *AirwayEdgeRepository) Create(ctx context.Context, edge *model.AirwayEdg
 
 func (r *AirwayEdgeRepository) Update(ctx context.Context, edge *model.AirwayEdge, expectedVersion uint, audit AuditRecord) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := lockNetworkState(tx); err != nil {
+			return err
+		}
 		var before model.AirwayEdge
 		if err := tx.First(&before, edge.ID).Error; err != nil {
 			return fmt.Errorf("load airway edge before update: %w", err)
+		}
+		beforeFingerprint, err := currentNetworkFingerprint(tx)
+		if err != nil {
+			return err
 		}
 		result := tx.Model(&model.AirwayEdge{}).Where("id = ? AND version = ?", edge.ID, expectedVersion).Updates(map[string]interface{}{
 			"resistance_ns2_m8": edge.ResistanceNS2M8, "area_m2": edge.AreaM2,
@@ -91,12 +108,15 @@ func (r *AirwayEdgeRepository) Update(ctx context.Context, edge *model.AirwayEdg
 		if result.RowsAffected != 1 {
 			return ErrVersionConflict
 		}
+		audit.EntityID = edge.ID
+		if err := invalidateIfNetworkChanged(tx, beforeFingerprint, audit, fmt.Sprintf("通风网络变更：巷道 %s 参数或状态变化", before.Code)); err != nil {
+			return err
+		}
 		if err := tx.First(edge, edge.ID).Error; err != nil {
 			return err
 		}
 		beforeJSON, _ := json.Marshal(before)
 		afterJSON, _ := json.Marshal(edge)
-		audit.EntityID = edge.ID
 		audit.BeforeState = string(beforeJSON)
 		audit.AfterState = string(afterJSON)
 		return writeAudit(tx, audit)

@@ -59,17 +59,33 @@ func (r *FanScenarioRepository) Create(ctx context.Context, scenario *model.FanS
 func (r *FanScenarioRepository) Transition(ctx context.Context, id, actorID uint, expectedVersion uint, from, to, reason string, audit AuditRecord) (*model.FanScenario, error) {
 	var updated model.FanScenario
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var before model.FanScenario
-		if err := tx.First(&before, id).Error; err != nil {
-			return fmt.Errorf("load fan scenario before transition: %w", err)
-		}
 		values := map[string]interface{}{
 			"scenario_status": to,
 			"reject_reason":   "",
 			"version":         gorm.Expr("version + 1"),
 		}
 		if to == "approved" {
+			// 与网络变更事务串行：先锁定网络版本单行，再读取并绑定当前网络快照，
+			// 并发变更要么先于本次批准被绑定进快照，要么随后使本次批准失效。
+			if err := lockNetworkState(tx); err != nil {
+				return err
+			}
+			nodes, edges, err := loadNetworkSnapshot(tx)
+			if err != nil {
+				return err
+			}
+			var state model.NetworkState
+			if err := tx.First(&state, networkStateSingletonID).Error; err != nil {
+				return fmt.Errorf("load network state for approval: %w", err)
+			}
+			values["approved_network_fingerprint"] = model.ComputeNetworkFingerprint(nodes, edges)
+			values["approved_network_revision"] = state.Revision
+			values["invalidation_reason"] = ""
 			values["approved_by"] = actorID
+		}
+		var before model.FanScenario
+		if err := tx.First(&before, id).Error; err != nil {
+			return fmt.Errorf("load fan scenario before transition: %w", err)
 		}
 		if to == "draft" {
 			values["approved_by"] = nil

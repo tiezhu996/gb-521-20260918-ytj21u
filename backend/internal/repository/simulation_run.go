@@ -45,16 +45,50 @@ func (r *SimulationRunRepository) Find(ctx context.Context, id uint) (*model.Sim
 	return &run, nil
 }
 
-func (r *SimulationRunRepository) Create(ctx context.Context, run *model.SimulationRun, audit AuditRecord) error {
-	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+// RunBuilder 在启动事务内基于同一网络快照构造推演结果。
+type RunBuilder func(scenario model.FanScenario, nodes []model.VentilationNode, edges []model.AirwayEdge) (*model.SimulationRun, error)
+
+// CreateGuarded 在单个事务内完成推演入口闸门：锁定网络版本、复核方案仍处于
+// 已批准状态、比对批准时绑定的网络指纹，全部通过后才构造并保存运行记录。
+// 并发网络变更会阻塞在版本锁之后，随后使批准失效，无法让旧批准漏过校验。
+func (r *SimulationRunRepository) CreateGuarded(ctx context.Context, scenarioID uint, build RunBuilder, audit *AuditRecord) (*model.SimulationRun, error) {
+	var created *model.SimulationRun
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := lockNetworkState(tx); err != nil {
+			return err
+		}
+		var scenario model.FanScenario
+		if err := tx.First(&scenario, scenarioID).Error; err != nil {
+			return fmt.Errorf("load scenario for simulation: %w", err)
+		}
+		if scenario.ScenarioStatus != "approved" {
+			return ErrScenarioNotApproved
+		}
+		nodes, edges, err := loadNetworkSnapshot(tx)
+		if err != nil {
+			return err
+		}
+		fingerprint := model.ComputeNetworkFingerprint(nodes, edges)
+		if scenario.ApprovedNetworkFingerprint == "" || scenario.ApprovedNetworkFingerprint != fingerprint {
+			return ErrApprovalStale
+		}
+		run, err := build(scenario, nodes, edges)
+		if err != nil {
+			return err
+		}
 		if err := tx.Create(run).Error; err != nil {
 			return fmt.Errorf("create simulation run: %w", err)
 		}
+		created = run
 		after, _ := json.Marshal(run)
 		audit.EntityID = run.ID
 		audit.AfterState = string(after)
-		return writeAudit(tx, audit)
+		return writeAudit(tx, *audit)
 	})
+	if err != nil {
+		return nil, err
+	}
+	return created, nil
 }
 
 func (r *SimulationRunRepository) ConfirmRisks(ctx context.Context, id, actorID uint, note string, audit AuditRecord) (*model.SimulationRun, error) {

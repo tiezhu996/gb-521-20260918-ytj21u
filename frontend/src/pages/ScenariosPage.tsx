@@ -58,7 +58,13 @@ export function ScenariosPage() {
   };
   const columns: ColumnsType<FanScenario> = [
     { title: '方案', width: 240, render: (_, row) => <div className="primary-cell"><strong>{row.name}</strong><span>v{row.version} · {row.operating_mode}</span></div> },
-    { title: '状态', dataIndex: 'scenario_status', width: 120, render: (value) => <StatusBadge status={value} /> },
+    { title: '状态', width: 230, render: (_, row) => (
+      <div className="status-cell">
+        <StatusBadge status={row.scenario_status} />
+        {row.scenario_status === 'approved' && row.approved_network_revision > 0 && <span className="muted">绑定网络快照 R{row.approved_network_revision}</span>}
+        {row.scenario_status === 'pending_review' && row.invalidation_reason && <span className="invalidation-note">{row.invalidation_reason}，待重新复核</span>}
+      </div>
+    ) },
     { title: '收敛阈值', dataIndex: 'solver_tolerance', width: 120, render: (value) => formatNumber(value, 4) },
     { title: '迭代上限', dataIndex: 'max_iterations', width: 110 },
     { title: '最近更新', dataIndex: 'updated_at', width: 180, render: formatDateTime },
@@ -83,7 +89,7 @@ export function ScenariosPage() {
           <div className="modal-actions"><Button onClick={() => setCreateOpen(false)}>保留当前列表</Button><Button type="primary" htmlType="submit" loading={busy}>创建草稿</Button></div>
         </Form>
       </Modal>
-      <ConfirmActionDialog open={Boolean(pending)} title={pending?.status === 'approved' ? '批准风机方案' : pending?.status === 'draft' ? '驳回方案至草稿' : pending?.status === 'archived' ? '归档已批准方案' : '提交方案复核'} consequence={pending?.status === 'approved' ? '批准后该版本可用于离线推演。此动作会记录操作者、请求 ID 与版本前后状态。' : pending?.status === 'draft' ? '方案将回到草稿，驳回原因会保留在版本记录中。' : pending?.status === 'archived' ? '归档后该版本不能再发起新的推演。' : '提交后工程师不能直接批准，须由复核员或管理员处理。'} confirmLabel={pending?.status === 'approved' ? '批准方案' : pending?.status === 'draft' ? '驳回至草稿' : pending?.status === 'archived' ? '归档方案' : '提交复核'} noteLabel={pending?.status === 'draft' ? '驳回原因' : '操作说明'} note={note} requireNote={pending?.status === 'draft'} busy={busy} onNoteChange={setNote} onCancel={() => { setPending(null); setNote(''); }} onConfirm={() => void commitTransition()} />
+      <ConfirmActionDialog open={Boolean(pending)} title={pending?.status === 'approved' ? '批准风机方案' : pending?.status === 'draft' ? '驳回方案至草稿' : pending?.status === 'archived' ? '归档已批准方案' : '提交方案复核'} consequence={pending?.status === 'approved' ? '批准时将绑定当前通风网络快照；此后节点或巷道新增、停用或参数变化会使批准立即失效，须重新复核后才能推演。' : pending?.status === 'draft' ? '方案将回到草稿，驳回原因会保留在版本记录中。' : pending?.status === 'archived' ? '归档后该版本不能再发起新的推演。' : '提交后工程师不能直接批准，须由复核员或管理员处理。'} confirmLabel={pending?.status === 'approved' ? '批准方案' : pending?.status === 'draft' ? '驳回至草稿' : pending?.status === 'archived' ? '归档方案' : '提交复核'} noteLabel={pending?.status === 'draft' ? '驳回原因' : '操作说明'} note={note} requireNote={pending?.status === 'draft'} busy={busy} onNoteChange={setNote} onCancel={() => { setPending(null); setNote(''); }} onConfirm={() => void commitTransition()} />
     </div>
   );
 }

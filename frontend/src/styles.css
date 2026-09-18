@@ -95,6 +95,8 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: 0.82rem; c
 .risk-info { color: #275d6b; background: #e2eef1; border-color: #9dc1c9; }
 .primary-cell { display: grid; gap: 3px; }
 .primary-cell span, .muted { color: var(--coal-600); font-size: 0.75rem; }
+.status-cell { display: grid; gap: 4px; justify-items: start; }
+.invalidation-note { color: #8e3526; font-size: 0.72rem; line-height: 1.35; }
 .table-actions { display: flex; gap: 6px; }
 .selected-row > td { background: #e7f1ec !important; }
 

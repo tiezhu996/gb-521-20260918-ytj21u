@@ -19,8 +19,12 @@ type FanScenario struct {
 	CreatedBy       uint           `gorm:"not null;index" json:"created_by"`
 	ApprovedBy      *uint          `gorm:"index" json:"approved_by"`
 	RejectReason    string         `gorm:"size:400" json:"reject_reason"`
-	CreatedAt       time.Time      `json:"created_at"`
-	UpdatedAt       time.Time      `json:"updated_at"`
+	// 批准时绑定的通风网络快照：网络内容变化后旧批准立即失效。
+	ApprovedNetworkRevision    uint      `gorm:"not null;default:0" json:"approved_network_revision"`
+	ApprovedNetworkFingerprint string    `gorm:"size:64;not null;default:''" json:"approved_network_fingerprint"`
+	InvalidationReason         string    `gorm:"size:400;not null;default:''" json:"invalidation_reason"`
+	CreatedAt                  time.Time `json:"created_at"`
+	UpdatedAt                  time.Time `json:"updated_at"`
 }
 
 func (FanScenario) TableName() string { return "fan_scenarios" }

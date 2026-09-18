@@ -18,6 +18,9 @@ export interface FanScenario {
   created_by: number;
   approved_by?: number;
   reject_reason: string;
+  approved_network_revision: number;
+  approved_network_fingerprint: string;
+  invalidation_reason: string;
   created_at: string;
   updated_at: string;
 }

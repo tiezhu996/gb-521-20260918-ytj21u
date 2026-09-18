@@ -13,6 +13,7 @@ import (
 	"gorm.io/driver/postgres"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"gorm.io/gorm/logger"
 
 	"mine-ventilation-network-simulator/backend/internal/constants"
@@ -89,8 +90,12 @@ func OpenDatabase(cfg Config) (*gorm.DB, error) {
 			&model.FanScenario{},
 			&model.SimulationRun{},
 			&model.AuditEvent{},
+			&model.NetworkState{},
 		); err != nil {
 			return nil, fmt.Errorf("auto migrate: %w", err)
+		}
+		if err := ensureNetworkState(db); err != nil {
+			return nil, err
 		}
 	}
 	if cfg.SeedData {
@@ -106,6 +111,46 @@ func ConfigureLogger(level slog.Level) *slog.Logger {
 	logger := slog.New(handler)
 	slog.SetDefault(logger)
 	return logger
+}
+
+// ensureNetworkState 创建单行网络版本记录，并为快照绑定功能上线前已批准的
+// 方案补绑当前网络指纹，避免历史批准陷入无法推演也无法重新批准的死角。
+func ensureNetworkState(db *gorm.DB) error {
+	state := model.NetworkState{ID: 1, Revision: 1}
+	if err := db.Clauses(clause.OnConflict{DoNothing: true}).Create(&state).Error; err != nil {
+		return fmt.Errorf("ensure network state: %w", err)
+	}
+	var unbound int64
+	if err := db.Model(&model.FanScenario{}).
+		Where("scenario_status = ? AND approved_network_fingerprint = ?", "approved", "").
+		Count(&unbound).Error; err != nil {
+		return fmt.Errorf("count unbound approvals: %w", err)
+	}
+	if unbound == 0 {
+		return nil
+	}
+	var nodes []model.VentilationNode
+	if err := db.Order("id ASC").Find(&nodes).Error; err != nil {
+		return fmt.Errorf("load nodes for approval backfill: %w", err)
+	}
+	var edges []model.AirwayEdge
+	if err := db.Order("id ASC").Find(&edges).Error; err != nil {
+		return fmt.Errorf("load edges for approval backfill: %w", err)
+	}
+	var current model.NetworkState
+	if err := db.First(&current, 1).Error; err != nil {
+		return fmt.Errorf("load network state for approval backfill: %w", err)
+	}
+	fingerprint := model.ComputeNetworkFingerprint(nodes, edges)
+	if err := db.Model(&model.FanScenario{}).
+		Where("scenario_status = ? AND approved_network_fingerprint = ?", "approved", "").
+		Updates(map[string]interface{}{
+			"approved_network_fingerprint": fingerprint,
+			"approved_network_revision":    current.Revision,
+		}).Error; err != nil {
+		return fmt.Errorf("backfill approval snapshots: %w", err)
+	}
+	return nil
 }
 
 func seed(db *gorm.DB) error {
@@ -159,8 +204,13 @@ func seed(db *gorm.DB) error {
 			return err
 		}
 		curve := datatypes.JSON([]byte(`[{"flow_m3s":0,"pressure_pa":1450},{"flow_m3s":30,"pressure_pa":1180},{"flow_m3s":60,"pressure_pa":720}]`))
+		var networkState model.NetworkState
+		if err := tx.First(&networkState, 1).Error; err != nil {
+			return fmt.Errorf("load network state for seed: %w", err)
+		}
+		fingerprint := model.ComputeNetworkFingerprint(nodes, edges)
 		scenarios := []model.FanScenario{
-			{Name: "夜班基准方案", Description: "当前网络的基准风机曲线，用于离线比较。", FanCurveJSON: curve, OperatingMode: "normal", ScenarioStatus: string(constants.ScenarioStatusApproved), SolverTolerance: 0.02, MaxIterations: 100, Version: 2, CreatedBy: users[0].ID, ApprovedBy: &users[1].ID},
+			{Name: "夜班基准方案", Description: "当前网络的基准风机曲线，用于离线比较。", FanCurveJSON: curve, OperatingMode: "normal", ScenarioStatus: string(constants.ScenarioStatusApproved), SolverTolerance: 0.02, MaxIterations: 100, Version: 2, CreatedBy: users[0].ID, ApprovedBy: &users[1].ID, ApprovedNetworkRevision: networkState.Revision, ApprovedNetworkFingerprint: fingerprint},
 			{Name: "检修降载草案", Description: "检修窗口的降载边界，仅供工程师提交复核。", FanCurveJSON: curve, OperatingMode: "reduced", ScenarioStatus: string(constants.ScenarioStatusDraft), SolverTolerance: 0.03, MaxIterations: 120, Version: 1, CreatedBy: users[0].ID},
 		}
 		if err := tx.Create(&scenarios).Error; err != nil {

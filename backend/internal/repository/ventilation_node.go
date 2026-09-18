@@ -57,10 +57,20 @@ func (r *VentilationNodeRepository) Find(ctx context.Context, id uint) (*model.V
 
 func (r *VentilationNodeRepository) Create(ctx context.Context, node *model.VentilationNode, audit AuditRecord) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := lockNetworkState(tx); err != nil {
+			return err
+		}
+		beforeFingerprint, err := currentNetworkFingerprint(tx)
+		if err != nil {
+			return err
+		}
 		if err := tx.Create(node).Error; err != nil {
 			return fmt.Errorf("create ventilation node: %w", err)
 		}
 		audit.EntityID = node.ID
+		if err := invalidateIfNetworkChanged(tx, beforeFingerprint, audit, fmt.Sprintf("通风网络变更：新增节点 %s", node.Code)); err != nil {
+			return err
+		}
 		after, _ := json.Marshal(node)
 		audit.AfterState = string(after)
 		return writeAudit(tx, audit)
@@ -69,19 +79,29 @@ func (r *VentilationNodeRepository) Create(ctx context.Context, node *model.Vent
 
 func (r *VentilationNodeRepository) Update(ctx context.Context, node *model.VentilationNode, audit AuditRecord) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := lockNetworkState(tx); err != nil {
+			return err
+		}
 		var before model.VentilationNode
 		if err := tx.First(&before, node.ID).Error; err != nil {
 			return fmt.Errorf("load ventilation node before update: %w", err)
 		}
+		beforeFingerprint, err := currentNetworkFingerprint(tx)
+		if err != nil {
+			return err
+		}
 		if err := tx.Model(&before).Select("node_type", "elevation_m", "required_airflow_m3_s", "pressure_pa", "status").Updates(node).Error; err != nil {
 			return fmt.Errorf("update ventilation node: %w", err)
+		}
+		audit.EntityID = node.ID
+		if err := invalidateIfNetworkChanged(tx, beforeFingerprint, audit, fmt.Sprintf("通风网络变更：节点 %s 参数或状态变化", before.Code)); err != nil {
+			return err
 		}
 		if err := tx.First(node, node.ID).Error; err != nil {
 			return fmt.Errorf("reload ventilation node: %w", err)
 		}
 		beforeJSON, _ := json.Marshal(before)
 		afterJSON, _ := json.Marshal(node)
-		audit.EntityID = node.ID
 		audit.BeforeState = string(beforeJSON)
 		audit.AfterState = string(afterJSON)
 		return writeAudit(tx, audit)

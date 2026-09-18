@@ -38,7 +38,7 @@ func New(cfg config.Config, db *gorm.DB, logger *slog.Logger) *gin.Engine {
 	nodeService := service.NewVentilationNodeService(nodeRepo, edgeRepo)
 	edgeService := service.NewAirwayEdgeService(edgeRepo, nodeRepo)
 	scenarioService := service.NewFanScenarioService(scenarioRepo)
-	runService := service.NewSimulationService(runRepo, scenarioRepo, nodeRepo, edgeRepo)
+	runService := service.NewSimulationService(runRepo, scenarioRepo)
 
 	supportHandler := handler.NewSupportHandler(supportService)
 	nodeHandler := handler.NewVentilationNodeHandler(nodeService)
