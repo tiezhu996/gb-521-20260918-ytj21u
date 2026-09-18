@@ -19,8 +19,25 @@ type FanScenario struct {
 	CreatedBy       uint           `gorm:"not null;index" json:"created_by"`
 	ApprovedBy      *uint          `gorm:"index" json:"approved_by"`
 	RejectReason    string         `gorm:"size:400" json:"reject_reason"`
-	CreatedAt       time.Time      `json:"created_at"`
-	UpdatedAt       time.Time      `json:"updated_at"`
+	// NetworkRevision 记录批准时绑定的通风网络版本号；为空表示从未绑定（非已批准方案）。
+	NetworkRevision *uint64 `gorm:"index" json:"network_revision,omitempty"`
+	// NetworkSnapshotHash 是批准时绑定的网络内容指纹，防止版本号之外的静默篡改。
+	NetworkSnapshotHash string `gorm:"size:64" json:"network_snapshot_hash,omitempty"`
+	// InvalidationReason 记录网络变化导致批准被系统撤销的原因，重新批准时清空。
+	InvalidationReason string    `gorm:"size:400" json:"invalidation_reason,omitempty"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
 }
 
 func (FanScenario) TableName() string { return "fan_scenarios" }
+
+// NetworkRevision 是全通风网络（节点与巷道）的单行版本计数器。
+// 任何节点/巷道新增、停用或参数变化都必须在同一事务内推进该版本，
+// 并锁定本行以串行化并发网络变更与推演准入。
+type NetworkRevision struct {
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	Revision  uint64    `gorm:"not null;default:0" json:"revision"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+func (NetworkRevision) TableName() string { return "network_revisions" }

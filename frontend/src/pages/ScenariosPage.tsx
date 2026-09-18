@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { Button, Form, Input, InputNumber, Modal, Select, Table, message } from 'antd';
-import { CheckCheck, GitCompareArrows, Plus, Send, Undo2 } from 'lucide-react';
+import { Alert, Button, Form, Input, InputNumber, Modal, Select, Table, message } from 'antd';
+import { AlertTriangle, CheckCheck, GitCompareArrows, Plus, Send, Undo2 } from 'lucide-react';
 import type { ColumnsType } from 'antd/es/table';
 import type { Key } from 'react';
 import { ConfirmActionDialog } from '../components/common/ConfirmActionDialog';
@@ -46,19 +46,24 @@ export function ScenariosPage() {
     setBusy(true);
     try {
       await transition(pending.scenario.id, pending.status, pending.scenario.version, note);
-      message.success(pending.status === 'approved' ? '方案已批准，可发起推演' : pending.status === 'draft' ? '方案已驳回草稿' : pending.status === 'archived' ? '方案已归档' : '方案已提交复核');
+      message.success(pending.status === 'approved' ? '方案已批准并绑定当前通风网络快照，可发起推演' : pending.status === 'draft' ? '方案已驳回草稿' : pending.status === 'archived' ? '方案已归档' : '方案已提交复核');
       setPending(null); setNote('');
     } catch (error) { reportError(error, '方案状态更新失败'); } finally { setBusy(false); }
   };
   const actionButtons = (scenario: FanScenario) => {
     if (scenario.scenario_status === 'draft' && canCreate) return <Button size="small" icon={<Send size={15} />} onClick={() => setPending({ scenario, status: 'pending_review' })}>提交复核</Button>;
-    if (scenario.scenario_status === 'pending_review' && hasRole('reviewer', 'admin')) return <div className="table-actions"><Button size="small" icon={<Undo2 size={15} />} onClick={() => setPending({ scenario, status: 'draft' })}>驳回</Button><Button size="small" type="primary" icon={<CheckCheck size={15} />} onClick={() => setPending({ scenario, status: 'approved' })}>批准</Button></div>;
+    if (scenario.scenario_status === 'pending_review' && hasRole('reviewer', 'admin')) return <div className="table-actions"><Button size="small" icon={<Undo2 size={15} />} onClick={() => setPending({ scenario, status: 'draft' })}>驳回</Button><Button size="small" type="primary" icon={<CheckCheck size={15} />} onClick={() => setPending({ scenario, status: 'approved' })}>{scenario.invalidation_reason ? '重新批准' : '批准'}</Button></div>;
     if (scenario.scenario_status === 'approved' && hasRole('admin')) return <Button size="small" onClick={() => setPending({ scenario, status: 'archived' })}>归档</Button>;
     return <span className="muted">无待办动作</span>;
   };
   const columns: ColumnsType<FanScenario> = [
-    { title: '方案', width: 240, render: (_, row) => <div className="primary-cell"><strong>{row.name}</strong><span>v{row.version} · {row.operating_mode}</span></div> },
+    { title: '方案', width: 240, render: (_, row) => <div className="primary-cell"><strong>{row.name}</strong><span>v{row.version} · {row.operating_mode}</span>{row.scenario_status === 'approved' && row.network_revision !== undefined && <span className="muted">已绑定网络快照 #{row.network_revision}</span>}</div> },
     { title: '状态', dataIndex: 'scenario_status', width: 120, render: (value) => <StatusBadge status={value} /> },
+    { title: '快照与失效提示', width: 320, render: (_, row) => row.invalidation_reason
+      ? <Alert type="error" showIcon icon={<AlertTriangle size={15} />} message="批准已因网络变化失效" description={row.invalidation_reason} />
+      : row.reject_reason
+        ? <Alert type="warning" showIcon message="驳回原因" description={row.reject_reason} />
+        : <span className="muted">{row.scenario_status === 'approved' ? '快照一致，可发起推演' : '暂无快照绑定'}</span> },
     { title: '收敛阈值', dataIndex: 'solver_tolerance', width: 120, render: (value) => formatNumber(value, 4) },
     { title: '迭代上限', dataIndex: 'max_iterations', width: 110 },
     { title: '最近更新', dataIndex: 'updated_at', width: 180, render: formatDateTime },
@@ -70,7 +75,7 @@ export function ScenariosPage() {
       <PageHeader eyebrow="方案控制 / 人工审批" title="风机方案版本" meta={<><span>{scenarios.length} 个方案</span><span>{edges.filter((edge) => edge.enabled).length} 条启用巷道作为当前网络上下文</span><span>当前角色：{user?.role}</span></>} actions={canCreate ? <Button type="primary" icon={<Plus size={17} />} onClick={() => setCreateOpen(true)}>新建方案</Button> : undefined} />
       <section className="workspace-section">
         <div className="section-heading"><div><span className="section-index">01</span><h2>审批队列</h2></div><span>选择两项可对比求解参数</span></div>
-        <Table rowKey="id" columns={columns} dataSource={scenarios} loading={loading} size="small" scroll={{ x: 980 }} rowSelection={{ selectedRowKeys: selectedKeys, onChange: (keys) => setSelectedKeys(keys.slice(-2)), getCheckboxProps: (record) => ({ disabled: selectedKeys.length >= 2 && !selectedKeys.includes(record.id) }) }} />
+        <Table rowKey="id" columns={columns} dataSource={scenarios} loading={loading} size="small" scroll={{ x: 1300 }} rowSelection={{ selectedRowKeys: selectedKeys, onChange: (keys) => setSelectedKeys(keys.slice(-2)), getCheckboxProps: (record) => ({ disabled: selectedKeys.length >= 2 && !selectedKeys.includes(record.id) }) }} />
       </section>
       {compared.length === 2 && <section className="workspace-section compare-strip" aria-labelledby="compare-heading"><div className="section-heading"><div><GitCompareArrows size={19} /><h2 id="compare-heading">参数对比</h2></div><Button type="text" onClick={() => setSelectedKeys([])}>清除选择</Button></div><div className="compare-grid">{compared.map((item) => <article key={item.id}><StatusBadge status={item.scenario_status} /><h3>{item.name}</h3><dl><div><dt>版本</dt><dd>v{item.version}</dd></div><div><dt>阈值</dt><dd>{item.solver_tolerance}</dd></div><div><dt>迭代上限</dt><dd>{item.max_iterations}</dd></div><div><dt>模式</dt><dd>{item.operating_mode}</dd></div></dl></article>)}</div></section>}
       <Modal title="新建风机方案草稿" open={createOpen} onCancel={() => setCreateOpen(false)} footer={null} width={680} destroyOnClose>
@@ -83,7 +88,7 @@ export function ScenariosPage() {
           <div className="modal-actions"><Button onClick={() => setCreateOpen(false)}>保留当前列表</Button><Button type="primary" htmlType="submit" loading={busy}>创建草稿</Button></div>
         </Form>
       </Modal>
-      <ConfirmActionDialog open={Boolean(pending)} title={pending?.status === 'approved' ? '批准风机方案' : pending?.status === 'draft' ? '驳回方案至草稿' : pending?.status === 'archived' ? '归档已批准方案' : '提交方案复核'} consequence={pending?.status === 'approved' ? '批准后该版本可用于离线推演。此动作会记录操作者、请求 ID 与版本前后状态。' : pending?.status === 'draft' ? '方案将回到草稿，驳回原因会保留在版本记录中。' : pending?.status === 'archived' ? '归档后该版本不能再发起新的推演。' : '提交后工程师不能直接批准，须由复核员或管理员处理。'} confirmLabel={pending?.status === 'approved' ? '批准方案' : pending?.status === 'draft' ? '驳回至草稿' : pending?.status === 'archived' ? '归档方案' : '提交复核'} noteLabel={pending?.status === 'draft' ? '驳回原因' : '操作说明'} note={note} requireNote={pending?.status === 'draft'} busy={busy} onNoteChange={setNote} onCancel={() => { setPending(null); setNote(''); }} onConfirm={() => void commitTransition()} />
+      <ConfirmActionDialog open={Boolean(pending)} title={pending?.status === 'approved' ? (pending.scenario.invalidation_reason ? '重新批准风机方案' : '批准风机方案') : pending?.status === 'draft' ? '驳回方案至草稿' : pending?.status === 'archived' ? '归档已批准方案' : '提交方案复核'} consequence={pending?.status === 'approved' ? '批准将绑定当前通风网络快照（版本号与内容指纹）；之后任何节点/巷道新增、停用或参数变化都会立即使本批准失效并要求重新复核。' : pending?.status === 'draft' ? '方案将回到草稿，驳回原因会保留在版本记录中。' : pending?.status === 'archived' ? '归档后该版本不能再发起新的推演。' : '提交后工程师不能直接批准，须由复核员或管理员处理。'} confirmLabel={pending?.status === 'approved' ? (pending.scenario.invalidation_reason ? '重新批准' : '批准方案') : pending?.status === 'draft' ? '驳回至草稿' : pending?.status === 'archived' ? '归档方案' : '提交复核'} noteLabel={pending?.status === 'draft' ? '驳回原因' : '操作说明'} note={note} requireNote={pending?.status === 'draft'} busy={busy} onNoteChange={setNote} onCancel={() => { setPending(null); setNote(''); }} onConfirm={() => void commitTransition()} />
     </div>
   );
 }

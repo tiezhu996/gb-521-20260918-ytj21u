@@ -33,12 +33,13 @@ func New(cfg config.Config, db *gorm.DB, logger *slog.Logger) *gin.Engine {
 	edgeRepo := repository.NewAirwayEdgeRepository(db)
 	scenarioRepo := repository.NewFanScenarioRepository(db)
 	runRepo := repository.NewSimulationRunRepository(db)
+	snapshotRepo := repository.NewNetworkSnapshotRepository(db)
 
 	supportService := service.NewSupportService(supportRepo, cfg.JWTSecret, cfg.JWTTTL)
 	nodeService := service.NewVentilationNodeService(nodeRepo, edgeRepo)
 	edgeService := service.NewAirwayEdgeService(edgeRepo, nodeRepo)
-	scenarioService := service.NewFanScenarioService(scenarioRepo)
-	runService := service.NewSimulationService(runRepo, scenarioRepo, nodeRepo, edgeRepo)
+	scenarioService := service.NewFanScenarioService(scenarioRepo, snapshotRepo)
+	runService := service.NewSimulationService(runRepo, scenarioRepo, snapshotRepo)
 
 	supportHandler := handler.NewSupportHandler(supportService)
 	nodeHandler := handler.NewVentilationNodeHandler(nodeService)

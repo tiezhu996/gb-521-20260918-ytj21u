@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -17,10 +18,11 @@ import (
 
 type FanScenarioService struct {
 	scenarios *repository.FanScenarioRepository
+	snapshots *repository.NetworkSnapshotRepository
 }
 
-func NewFanScenarioService(scenarios *repository.FanScenarioRepository) *FanScenarioService {
-	return &FanScenarioService{scenarios: scenarios}
+func NewFanScenarioService(scenarios *repository.FanScenarioRepository, snapshots *repository.NetworkSnapshotRepository) *FanScenarioService {
+	return &FanScenarioService{scenarios: scenarios, snapshots: snapshots}
 }
 
 func (s *FanScenarioService) List(ctx context.Context, query dto.ScenarioListQuery) ([]model.FanScenario, int64, int, int, error) {
@@ -75,6 +77,18 @@ func (s *FanScenarioService) Transition(ctx context.Context, id uint, input dto.
 	}
 	audit := actor.Audit("fan_scenario."+string(to), "fan_scenario")
 	audit.Metadata = fmt.Sprintf(`{"reason":%q}`, strings.TrimSpace(input.Reason))
+	if to == constants.ScenarioStatusApproved {
+		// 批准必须在锁定网络版本的事务内绑定当前网络快照（版本号 + 内容指纹），
+		// 杜绝批准与并发网络变更交错导致的旧/新快照错配。
+		updated, _, err := s.snapshots.BindApprovalSnapshot(ctx, id, actor.ID, input.Version, audit)
+		if err != nil {
+			if errors.Is(err, repository.ErrVersionConflict) {
+				return nil, api.Conflict("VERSION_CONFLICT", "方案状态或版本已变化，请刷新后重新批准")
+			}
+			return nil, mapRepositoryError(err, "风机方案")
+		}
+		return updated, nil
+	}
 	updated, err := s.scenarios.Transition(ctx, id, actor.ID, input.Version, string(from), string(to), strings.TrimSpace(input.Reason), audit)
 	if err != nil {
 		return nil, mapRepositoryError(err, "风机方案")

@@ -8,13 +8,34 @@ import (
 
 	"gorm.io/gorm"
 
+	"mine-ventilation-network-simulator/backend/internal/constants"
 	"mine-ventilation-network-simulator/backend/internal/model"
 )
 
-type VentilationNodeRepository struct{ db *gorm.DB }
+type VentilationNodeRepository struct {
+	db      *gorm.DB
+	dialect string
+}
 
 func NewVentilationNodeRepository(db *gorm.DB) *VentilationNodeRepository {
-	return &VentilationNodeRepository{db: db}
+	return &VentilationNodeRepository{db: db, dialect: db.Dialector.Name()}
+}
+
+// nodeAffectsSnapshot 判断节点写入是否改变推演消费的网络快照字段。
+func nodeAffectsSnapshot(before, after model.VentilationNode) bool {
+	return before.NodeType != after.NodeType ||
+		before.ElevationM != after.ElevationM ||
+		before.RequiredAirflowM3S != after.RequiredAirflowM3S ||
+		before.PressurePa != after.PressurePa ||
+		before.Status != after.Status
+}
+
+// nodeInvalidationReason 生成失效原因：节点停用/参数变化。
+func nodeInvalidationReason(node *model.VentilationNode) string {
+	if node.Status != string(constants.NodeStatusActive) {
+		return fmt.Sprintf("通风节点 %s 已停用（状态：%s），旧批准快照失效，须重新复核", node.Code, node.Status)
+	}
+	return fmt.Sprintf("通风节点 %s 参数已变化，旧批准快照失效，须重新复核", node.Code)
 }
 
 func (r *VentilationNodeRepository) List(ctx context.Context, page, pageSize int, nodeType, status, search string) ([]model.VentilationNode, int64, error) {
@@ -63,7 +84,15 @@ func (r *VentilationNodeRepository) Create(ctx context.Context, node *model.Vent
 		audit.EntityID = node.ID
 		after, _ := json.Marshal(node)
 		audit.AfterState = string(after)
-		return writeAudit(tx, audit)
+		if err := writeAudit(tx, audit); err != nil {
+			return err
+		}
+		// 新增节点改变网络拓扑/边界，推进版本并失效旧批准。
+		reason := fmt.Sprintf("新增通风节点 %s，旧批准快照失效，须重新复核", node.Code)
+		if _, _, err := BumpRevisionAndInvalidate(tx, r.dialect, reason, audit); err != nil {
+			return err
+		}
+		return nil
 	})
 }
 
@@ -72,6 +101,10 @@ func (r *VentilationNodeRepository) Update(ctx context.Context, node *model.Vent
 		var before model.VentilationNode
 		if err := tx.First(&before, node.ID).Error; err != nil {
 			return fmt.Errorf("load ventilation node before update: %w", err)
+		}
+		if !nodeAffectsSnapshot(before, *node) {
+			// 无实质网络参数变化：跳过版本推进，旧批准继续有效。
+			return nil
 		}
 		if err := tx.Model(&before).Select("node_type", "elevation_m", "required_airflow_m3_s", "pressure_pa", "status").Updates(node).Error; err != nil {
 			return fmt.Errorf("update ventilation node: %w", err)
@@ -84,6 +117,12 @@ func (r *VentilationNodeRepository) Update(ctx context.Context, node *model.Vent
 		audit.EntityID = node.ID
 		audit.BeforeState = string(beforeJSON)
 		audit.AfterState = string(afterJSON)
-		return writeAudit(tx, audit)
+		if err := writeAudit(tx, audit); err != nil {
+			return err
+		}
+		if _, _, err := BumpRevisionAndInvalidate(tx, r.dialect, nodeInvalidationReason(node), audit); err != nil {
+			return err
+		}
+		return nil
 	})
 }

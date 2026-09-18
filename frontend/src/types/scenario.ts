@@ -18,6 +18,11 @@ export interface FanScenario {
   created_by: number;
   approved_by?: number;
   reject_reason: string;
+  // 批准时绑定的通风网络版本号与内容指纹；仅已批准方案有值。
+  network_revision?: number;
+  network_snapshot_hash?: string;
+  // 网络变化导致批准被系统撤销时的原因，重新批准后清空。
+  invalidation_reason?: string;
   created_at: string;
   updated_at: string;
 }

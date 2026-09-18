@@ -8,12 +8,38 @@ import (
 
 	"gorm.io/gorm"
 
+	"mine-ventilation-network-simulator/backend/internal/constants"
 	"mine-ventilation-network-simulator/backend/internal/model"
 )
 
-type AirwayEdgeRepository struct{ db *gorm.DB }
+type AirwayEdgeRepository struct {
+	db      *gorm.DB
+	dialect string
+}
 
-func NewAirwayEdgeRepository(db *gorm.DB) *AirwayEdgeRepository { return &AirwayEdgeRepository{db: db} }
+func NewAirwayEdgeRepository(db *gorm.DB) *AirwayEdgeRepository {
+	return &AirwayEdgeRepository{db: db, dialect: db.Dialector.Name()}
+}
+
+// edgeAffectsSnapshot 判断巷道写入是否改变推演消费的网络快照字段。
+func edgeAffectsSnapshot(before, after model.AirwayEdge) bool {
+	return before.ResistanceNS2M8 != after.ResistanceNS2M8 ||
+		before.AreaM2 != after.AreaM2 ||
+		before.MaxVelocityMS != after.MaxVelocityMS ||
+		before.DoorState != after.DoorState ||
+		before.Enabled != after.Enabled ||
+		before.CriticalPath != after.CriticalPath
+}
+
+func edgeInvalidationReason(edge *model.AirwayEdge) string {
+	if !edge.Enabled {
+		return fmt.Sprintf("巷道 %s 已停用，旧批准快照失效，须重新复核", edge.Code)
+	}
+	if edge.DoorState == string(constants.DoorStateClosed) {
+		return fmt.Sprintf("巷道 %s 风门已关闭，旧批准快照失效，须重新复核", edge.Code)
+	}
+	return fmt.Sprintf("巷道 %s 参数已变化，旧批准快照失效，须重新复核", edge.Code)
+}
 
 func (r *AirwayEdgeRepository) List(ctx context.Context, page, pageSize int, enabled, search string) ([]model.AirwayEdge, int64, error) {
 	query := r.db.WithContext(ctx).Model(&model.AirwayEdge{})
@@ -69,7 +95,14 @@ func (r *AirwayEdgeRepository) Create(ctx context.Context, edge *model.AirwayEdg
 		after, _ := json.Marshal(edge)
 		audit.EntityID = edge.ID
 		audit.AfterState = string(after)
-		return writeAudit(tx, audit)
+		if err := writeAudit(tx, audit); err != nil {
+			return err
+		}
+		reason := fmt.Sprintf("新增巷道 %s，旧批准快照失效，须重新复核", edge.Code)
+		if _, _, err := BumpRevisionAndInvalidate(tx, r.dialect, reason, audit); err != nil {
+			return err
+		}
+		return nil
 	})
 }
 
@@ -78,6 +111,13 @@ func (r *AirwayEdgeRepository) Update(ctx context.Context, edge *model.AirwayEdg
 		var before model.AirwayEdge
 		if err := tx.First(&before, edge.ID).Error; err != nil {
 			return fmt.Errorf("load airway edge before update: %w", err)
+		}
+		if before.Version != expectedVersion {
+			return ErrVersionConflict
+		}
+		if !edgeAffectsSnapshot(before, *edge) {
+			// 无实质网络参数变化：跳过版本推进与乐观锁，旧批准继续有效。
+			return nil
 		}
 		result := tx.Model(&model.AirwayEdge{}).Where("id = ? AND version = ?", edge.ID, expectedVersion).Updates(map[string]interface{}{
 			"resistance_ns2_m8": edge.ResistanceNS2M8, "area_m2": edge.AreaM2,
@@ -99,6 +139,12 @@ func (r *AirwayEdgeRepository) Update(ctx context.Context, edge *model.AirwayEdg
 		audit.EntityID = edge.ID
 		audit.BeforeState = string(beforeJSON)
 		audit.AfterState = string(afterJSON)
-		return writeAudit(tx, audit)
+		if err := writeAudit(tx, audit); err != nil {
+			return err
+		}
+		if _, _, err := BumpRevisionAndInvalidate(tx, r.dialect, edgeInvalidationReason(edge), audit); err != nil {
+			return err
+		}
+		return nil
 	})
 }

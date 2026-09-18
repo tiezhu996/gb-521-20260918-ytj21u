@@ -17,6 +17,7 @@ import (
 
 	"mine-ventilation-network-simulator/backend/internal/constants"
 	"mine-ventilation-network-simulator/backend/internal/model"
+	"mine-ventilation-network-simulator/backend/internal/repository"
 )
 
 type Config struct {
@@ -81,9 +82,16 @@ func OpenDatabase(cfg Config) (*gorm.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open %s database: %w", cfg.DBDriver, err)
 	}
+	if cfg.DBDriver == "sqlite" {
+		// 单连接串行化所有事务，配合版本行写锁实现并发网络变更与推演准入的互斥。
+		if sqlDB, err := db.DB(); err == nil {
+			sqlDB.SetMaxOpenConns(1)
+		}
+	}
 	if cfg.AutoMigrate {
 		if err := db.AutoMigrate(
 			&model.User{},
+			&model.NetworkRevision{},
 			&model.VentilationNode{},
 			&model.AirwayEdge{},
 			&model.FanScenario{},
@@ -91,6 +99,13 @@ func OpenDatabase(cfg Config) (*gorm.DB, error) {
 			&model.AuditEvent{},
 		); err != nil {
 			return nil, fmt.Errorf("auto migrate: %w", err)
+		}
+		// 版本计数单行必须在任何服务启动前就位。
+		if err := db.Exec(
+			"INSERT INTO network_revisions (id, revision, updated_at) VALUES (1, 0, ?) ON CONFLICT (id) DO NOTHING",
+			time.Now().UTC(),
+		).Error; err != nil {
+			return nil, fmt.Errorf("seed network revision row: %w", err)
 		}
 	}
 	if cfg.SeedData {
@@ -159,8 +174,11 @@ func seed(db *gorm.DB) error {
 			return err
 		}
 		curve := datatypes.JSON([]byte(`[{"flow_m3s":0,"pressure_pa":1450},{"flow_m3s":30,"pressure_pa":1180},{"flow_m3s":60,"pressure_pa":720}]`))
+		// 种子批准方案绑定初始网络快照（revision=0 + 内容指纹），开箱即可推演。
+		seedFingerprint := repository.ComputeNetworkFingerprint(nodes, edges)
+		seedRevision := uint64(0)
 		scenarios := []model.FanScenario{
-			{Name: "夜班基准方案", Description: "当前网络的基准风机曲线，用于离线比较。", FanCurveJSON: curve, OperatingMode: "normal", ScenarioStatus: string(constants.ScenarioStatusApproved), SolverTolerance: 0.02, MaxIterations: 100, Version: 2, CreatedBy: users[0].ID, ApprovedBy: &users[1].ID},
+			{Name: "夜班基准方案", Description: "当前网络的基准风机曲线，用于离线比较。", FanCurveJSON: curve, OperatingMode: "normal", ScenarioStatus: string(constants.ScenarioStatusApproved), SolverTolerance: 0.02, MaxIterations: 100, Version: 2, CreatedBy: users[0].ID, ApprovedBy: &users[1].ID, NetworkRevision: &seedRevision, NetworkSnapshotHash: seedFingerprint},
 			{Name: "检修降载草案", Description: "检修窗口的降载边界，仅供工程师提交复核。", FanCurveJSON: curve, OperatingMode: "reduced", ScenarioStatus: string(constants.ScenarioStatusDraft), SolverTolerance: 0.03, MaxIterations: 120, Version: 1, CreatedBy: users[0].ID},
 		}
 		if err := tx.Create(&scenarios).Error; err != nil {

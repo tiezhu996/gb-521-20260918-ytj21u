@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -22,8 +23,7 @@ const algorithmVersion = "air-balance-v1"
 type SimulationService struct {
 	runs      *repository.SimulationRunRepository
 	scenarios *repository.FanScenarioRepository
-	nodes     *repository.VentilationNodeRepository
-	edges     *repository.AirwayEdgeRepository
+	snapshots *repository.NetworkSnapshotRepository
 }
 
 type simulationSnapshot struct {
@@ -43,8 +43,8 @@ type solverResult struct {
 	NetworkIssues []dto.NetworkIssue
 }
 
-func NewSimulationService(runs *repository.SimulationRunRepository, scenarios *repository.FanScenarioRepository, nodes *repository.VentilationNodeRepository, edges *repository.AirwayEdgeRepository) *SimulationService {
-	return &SimulationService{runs: runs, scenarios: scenarios, nodes: nodes, edges: edges}
+func NewSimulationService(runs *repository.SimulationRunRepository, scenarios *repository.FanScenarioRepository, snapshots *repository.NetworkSnapshotRepository) *SimulationService {
+	return &SimulationService{runs: runs, scenarios: scenarios, snapshots: snapshots}
 }
 
 func (s *SimulationService) List(ctx context.Context, query dto.SimulationListQuery) ([]model.SimulationRun, int64, int, int, error) {
@@ -65,40 +65,45 @@ func (s *SimulationService) Get(ctx context.Context, id uint) (*model.Simulation
 }
 
 func (s *SimulationService) Start(ctx context.Context, scenarioID uint, actor Actor) (*model.SimulationRun, error) {
-	scenario, err := s.scenarios.Find(ctx, scenarioID)
-	if err != nil {
+	// 先做存在性检查，给出 404 语义；真正的状态与快照准入在锁事务内完成。
+	if _, err := s.scenarios.Find(ctx, scenarioID); err != nil {
 		return nil, mapRepositoryError(err, "风机方案")
 	}
-	if scenario.ScenarioStatus != string(constants.ScenarioStatusApproved) {
-		return nil, api.Conflict("SCENARIO_NOT_APPROVED", "只有已批准方案可以发起离线推演")
-	}
-	nodes, err := s.nodes.AllActive(ctx)
-	if err != nil {
-		return nil, mapRepositoryError(err, "通风节点")
-	}
-	edges, err := s.edges.AllEnabled(ctx)
-	if err != nil {
-		return nil, mapRepositoryError(err, "巷道边")
-	}
-	result := solveNetwork(*scenario, nodes, edges)
-	now := time.Now().UTC()
-	snapshotJSON := mustJSON(simulationSnapshot{Scenario: *scenario, Nodes: nodes, Edges: edges})
-	run := &model.SimulationRun{
-		ScenarioID: scenario.ID, RunStatus: string(result.Status), IterationCount: result.Iterations,
-		Residual: result.Residual, InputSnapshotJSON: snapshotJSON,
-		NodePressuresJSON: mustJSON(result.Pressures), EdgeFlowsJSON: mustJSON(result.Flows),
-		ResidualsJSON: mustJSON(result.Residuals), RiskFlagsJSON: mustJSON(result.Risks),
-		AlgorithmVersion: algorithmVersion, StartedBy: actor.ID, StartedAt: now, FinishedAt: &now,
-	}
 	audit := actor.Audit("simulation_run.started", "simulation_run")
-	audit.Metadata = string(mustJSON(map[string]interface{}{
-		"scenario_id": scenario.ID, "result_status": result.Status,
-		"network_issues": result.NetworkIssues,
-	}))
-	if err := s.runs.Create(ctx, run, audit); err != nil {
+	run, err := s.snapshots.CreateVerifiedRun(ctx, scenarioID, audit, func(scenario model.FanScenario, nodes []model.VentilationNode, edges []model.AirwayEdge) (*model.SimulationRun, string, error) {
+		result := solveNetwork(scenario, nodes, edges)
+		now := time.Now().UTC()
+		snapshotJSON := mustJSON(simulationSnapshot{Scenario: scenario, Nodes: nodes, Edges: edges})
+		newRun := &model.SimulationRun{
+			ScenarioID: scenario.ID, RunStatus: string(result.Status), IterationCount: result.Iterations,
+			Residual: result.Residual, InputSnapshotJSON: snapshotJSON,
+			NodePressuresJSON: mustJSON(result.Pressures), EdgeFlowsJSON: mustJSON(result.Flows),
+			ResidualsJSON: mustJSON(result.Residuals), RiskFlagsJSON: mustJSON(result.Risks),
+			AlgorithmVersion: algorithmVersion, StartedBy: actor.ID, StartedAt: now, FinishedAt: &now,
+		}
+		metadata := mustJSON(map[string]interface{}{
+			"scenario_id":           scenario.ID,
+			"result_status":         result.Status,
+			"network_revision":      derefRevision(scenario.NetworkRevision),
+			"network_snapshot_hash": scenario.NetworkSnapshotHash,
+			"network_issues":        result.NetworkIssues,
+		})
+		return newRun, string(metadata), nil
+	})
+	if err != nil {
+		if errors.Is(err, repository.ErrSnapshotStale) {
+			return nil, api.Conflict("SCENARIO_SNAPSHOT_STALE", "批准绑定的通风网络快照已过期：网络发生新增、停用或参数变化，请由复核员重新复核批准后再启动推演")
+		}
 		return nil, mapRepositoryError(err, "推演记录")
 	}
 	return run, nil
+}
+
+func derefRevision(value *uint64) uint64 {
+	if value == nil {
+		return 0
+	}
+	return *value
 }
 
 func (s *SimulationService) ConfirmRisks(ctx context.Context, id uint, note string, actor Actor) (*model.SimulationRun, error) {
